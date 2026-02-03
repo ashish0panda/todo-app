@@ -1,22 +1,20 @@
 package com.example.todolist
 
+import android.content.Context
 import android.os.Bundle
+import android.view.HapticFeedbackConstants
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.*
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -24,12 +22,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.glance.appwidget.updateAll
 import com.example.todolist.ui.theme.TodoListTheme
 import kotlinx.coroutines.launch
 
@@ -42,7 +40,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             TodoListTheme {
-                TodoApp(todoDao)
+                TodoApp(todoDao, this)
             }
         }
     }
@@ -50,15 +48,27 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TodoApp(todoDao: TodoDao) {
+fun TodoApp(todoDao: TodoDao, context: Context) {
     val todoItems by todoDao.getAllItems().collectAsState(initial = emptyList())
-    var showDialog by remember { mutableStateOf(false) }
+    var showAddDialog by remember { mutableStateOf(false) }
+    var editingItem by remember { mutableStateOf<TodoItem?>(null) }
+    var itemToMoveId by remember { mutableStateOf<Int?>(null) }
+
     var newTaskTitle by remember { mutableStateOf("") }
+    var editTaskTitle by remember { mutableStateOf("") }
+
     val scope = rememberCoroutineScope()
 
     val completedCount = todoItems.count { it.isCompleted }
     val totalCount = todoItems.size
     val progress = if (totalCount > 0) completedCount.toFloat() / totalCount else 0f
+
+    // Trigger widget update
+    fun updateWidget() {
+        scope.launch {
+            TodoWidget().updateAll(context)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -88,7 +98,7 @@ fun TodoApp(todoDao: TodoDao) {
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { showDialog = true },
+                onClick = { showAddDialog = true },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
                 shape = CircleShape,
@@ -127,14 +137,68 @@ fun TodoApp(todoDao: TodoDao) {
                         items(todoItems, key = { it.id }) { item ->
                             TodoRow(
                                 item = item,
+                                isMoveMode = itemToMoveId == item.id,
                                 onToggle = {
-                                    scope.launch {
-                                        todoDao.update(item.copy(isCompleted = !item.isCompleted))
+                                    if (itemToMoveId == item.id) {
+                                        itemToMoveId = null
+                                    } else {
+                                        scope.launch {
+                                            todoDao.update(item.copy(isCompleted = !item.isCompleted))
+                                            updateWidget()
+                                        }
                                     }
+                                },
+                                onEdit = {
+                                    editingItem = item
+                                    editTaskTitle = item.title
                                 },
                                 onDelete = {
                                     scope.launch {
                                         todoDao.delete(item)
+                                        updateWidget()
+                                    }
+                                },
+                                onLongClick = {
+                                    itemToMoveId = if (itemToMoveId == item.id) null else item.id
+                                },
+                                onMoveUp = {
+                                    val currentItem = todoItems.find { it.id == item.id }
+                                    currentItem?.let { activeItem ->
+                                        val index = todoItems.indexOf(activeItem)
+                                        if (index > 0) {
+                                            val otherItem = todoItems[index - 1]
+                                            if (!otherItem.isCompleted) {
+                                                scope.launch {
+                                                    val pos1 = activeItem.position
+                                                    val pos2 = otherItem.position
+                                                    todoDao.updateAll(listOf(
+                                                        activeItem.copy(position = pos2),
+                                                        otherItem.copy(position = pos1)
+                                                    ))
+                                                    updateWidget()
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                onMoveDown = {
+                                    val currentItem = todoItems.find { it.id == item.id }
+                                    currentItem?.let { activeItem ->
+                                        val index = todoItems.indexOf(activeItem)
+                                        if (index < todoItems.size - 1) {
+                                            val otherItem = todoItems[index + 1]
+                                            if (!otherItem.isCompleted) {
+                                                scope.launch {
+                                                    val pos1 = activeItem.position
+                                                    val pos2 = otherItem.position
+                                                    todoDao.updateAll(listOf(
+                                                        activeItem.copy(position = pos2),
+                                                        otherItem.copy(position = pos1)
+                                                    ))
+                                                    updateWidget()
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             )
@@ -144,23 +208,50 @@ fun TodoApp(todoDao: TodoDao) {
             }
         }
 
-        if (showDialog) {
-            AddTaskDialog(
-                title = newTaskTitle,
+        if (showAddDialog) {
+            TaskDialog(
+                title = "What's next?",
+                taskTitle = newTaskTitle,
                 onTitleChange = { newTaskTitle = it },
                 onDismiss = {
-                    showDialog = false
+                    showAddDialog = false
                     newTaskTitle = ""
                 },
                 onConfirm = {
                     if (newTaskTitle.isNotBlank()) {
                         scope.launch {
-                            todoDao.insert(TodoItem(title = newTaskTitle))
+                            val maxPos = todoDao.getMaxPosition() ?: 0
+                            todoDao.insert(TodoItem(title = newTaskTitle, position = maxPos + 1))
+                            updateWidget()
                             newTaskTitle = ""
-                            showDialog = false
+                            showAddDialog = false
                         }
                     }
-                }
+                },
+                confirmLabel = "Add to Queue"
+            )
+        }
+
+        editingItem?.let { item ->
+            TaskDialog(
+                title = "Edit Task",
+                taskTitle = editTaskTitle,
+                onTitleChange = { editTaskTitle = it },
+                onDismiss = {
+                    editingItem = null
+                    editTaskTitle = ""
+                },
+                onConfirm = {
+                    if (editTaskTitle.isNotBlank()) {
+                        scope.launch {
+                            todoDao.update(item.copy(title = editTaskTitle))
+                            updateWidget()
+                            editingItem = null
+                            editTaskTitle = ""
+                        }
+                    }
+                },
+                confirmLabel = "Update Task"
             )
         }
     }
@@ -175,134 +266,136 @@ fun EmptyState() {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Surface(
-            modifier = Modifier.size(120.dp),
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    Icons.Default.Add,
-                    contentDescription = null,
-                    modifier = Modifier.size(48.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            }
-        }
-        Spacer(modifier = Modifier.height(24.dp))
+        Icon(
+            imageVector = Icons.Default.TaskAlt,
+            contentDescription = null,
+            modifier = Modifier.size(80.dp),
+            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+        )
+        Spacer(modifier = Modifier.height(16.dp))
         Text(
-            "Clear Mind, Clear List",
+            text = "Your list is clear",
             style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center
+            fontWeight = FontWeight.Bold
         )
         Text(
-            "Add your first task to start your queue.",
+            text = "Add a task to start your journey",
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 8.dp)
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TodoRow(
     item: TodoItem,
+    isMoveMode: Boolean,
     onToggle: () -> Unit,
-    onDelete: () -> Unit
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onLongClick: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit
 ) {
-    val alpha by animateFloatAsState(if (item.isCompleted) 0.6f else 1f, label = "alpha")
-    val scale by animateFloatAsState(if (item.isCompleted) 0.98f else 1f, label = "scale")
-
+    val view = LocalView.current
+    
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .animateContentSize(animationSpec = spring())
-            .graphicsLayer(alpha = alpha, scaleX = scale, scaleY = scale),
-        shape = RoundedCornerShape(20.dp),
-        color = if (item.isCompleted) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f) 
-                else MaterialTheme.colorScheme.surface,
-        tonalElevation = if (item.isCompleted) 0.dp else 2.dp,
-        shadowElevation = if (item.isCompleted) 0.dp else 1.dp,
-        onClick = onToggle
+            .combinedClickable(
+                onClick = onToggle,
+                onLongClick = {
+                    view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    onLongClick()
+                }
+            ),
+        shape = RoundedCornerShape(16.dp),
+        color = if (isMoveMode) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        tonalElevation = if (isMoveMode) 4.dp else 0.dp
     ) {
         Row(
             modifier = Modifier
-                .padding(16.dp)
-                .fillMaxWidth(),
+                .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onToggle) {
                 Icon(
-                    imageVector = if (item.isCompleted) Icons.Filled.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-                    contentDescription = "Toggle completion",
-                    tint = if (item.isCompleted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                    imageVector = if (item.isCompleted) Icons.Default.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                    contentDescription = "Complete",
+                    tint = if (item.isCompleted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            
-            Spacer(modifier = Modifier.width(8.dp))
-            
+
             Text(
                 text = item.title,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 8.dp),
                 style = MaterialTheme.typography.bodyLarge.copy(
-                    textDecoration = if (item.isCompleted) TextDecoration.LineThrough else null,
-                    fontWeight = if (item.isCompleted) FontWeight.Normal else FontWeight.Medium
-                ),
-                color = if (item.isCompleted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
-            )
-            
-            IconButton(
-                onClick = onDelete,
-                colors = IconButtonDefaults.iconButtonColors(
-                    contentColor = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
+                    textDecoration = if (item.isCompleted) TextDecoration.LineThrough else TextDecoration.None,
+                    color = if (item.isCompleted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
                 )
-            ) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete")
+            )
+
+            if (isMoveMode) {
+                Row {
+                    IconButton(onClick = onMoveUp) {
+                        Icon(Icons.Default.ArrowUpward, "Move Up")
+                    }
+                    IconButton(onClick = onMoveDown) {
+                        Icon(Icons.Default.ArrowDownward, "Move Down")
+                    }
+                }
+            } else {
+                Row {
+                    IconButton(onClick = onEdit) {
+                        Icon(Icons.Default.Edit, "Edit", tint = MaterialTheme.colorScheme.primary)
+                    }
+                    IconButton(onClick = onDelete) {
+                        Icon(Icons.Default.Delete, "Delete", tint = MaterialTheme.colorScheme.error)
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-fun AddTaskDialog(
+fun TaskDialog(
     title: String,
+    taskTitle: String,
     onTitleChange: (String) -> Unit,
     onDismiss: () -> Unit,
-    onConfirm: () -> Unit
+    onConfirm: () -> Unit,
+    confirmLabel: String
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        shape = RoundedCornerShape(28.dp),
-        title = { Text("What's next?", fontWeight = FontWeight.Bold) },
+        title = { Text(title, fontWeight = FontWeight.Bold) },
         text = {
             OutlinedTextField(
-                value = title,
+                value = taskTitle,
                 onValueChange = onTitleChange,
-                placeholder = { Text("Type your task here...") },
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
-                )
+                placeholder = { Text("Task description") },
+                shape = RoundedCornerShape(12.dp),
+                singleLine = true
             )
         },
         confirmButton = {
             Button(
                 onClick = onConfirm,
-                shape = RoundedCornerShape(12.dp),
-                enabled = title.isNotBlank()
+                shape = RoundedCornerShape(8.dp)
             ) {
-                Text("Add to Queue")
+                Text(confirmLabel)
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Cancel")
             }
-        }
+        },
+        shape = RoundedCornerShape(24.dp)
     )
 }
